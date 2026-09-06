@@ -1,0 +1,103 @@
+# CD — roda a cada push na main (ou seja, pós-merge de PR). Aplica a infra (VPC/EKS/node group)
+# e os add-ons de nível de cluster (metrics-server, integração Kubernetes da New Relic).
+#
+# Este repositório não builda nem publica nada da aplicação — isso é o CD do repositório
+# fiap-mecanica. A relação entre os dois é só de leitura: o app lê outputs daqui via
+# terraform_remote_state (nome do cluster) para saber onde fazer o kubectl apply.
+
+name: CD
+
+on:
+  push:
+    branches: [ "main" ]
+
+concurrency:
+  group: cd-${{ github.ref }}
+  # false de propósito: mesmo motivo do repositório fiap-mecanica — terraform apply sem lock
+  # nativo, cancelar no meio pode deixar o state ou o cluster num estado parcial.
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  EKS_CLUSTER_NAME: eks-fiap-mecanica
+
+jobs:
+  terraform-apply:
+    runs-on: ubuntu-latest
+    # 40min: um apply incremental leva segundos, mas criar o cluster EKS + node group do zero
+    # (ex: após um terraform destroy) pode passar de 20min só no control plane do EKS.
+    timeout-minutes: 40
+    environment: producao
+    permissions:
+      contents: read
+    outputs:
+      eks_cluster_name: ${{ steps.tf_outputs.outputs.eks_cluster_name }}
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+        aws-region: ${{ env.AWS_REGION }}
+    # O bucket do backend não é gerenciado pelo Terraform (ver bucket.tf) — o recurso
+    # `aws_s3_bucket` sempre lê `GetBucketObjectLockConfiguration`, e uma SCP de conta AWS
+    # Academy Lab pode negar essa chamada explicitamente, quebrando todo `plan`/`apply` do módulo
+    # para sempre. Criar aqui, de forma idempotente, elimina o passo manual de bootstrap: numa
+    # conta nova, o próprio CD garante que o bucket existe antes do `terraform init`.
+    - name: Garantir que o bucket do backend existe (idempotente)
+      run: |
+        aws s3api head-bucket --bucket fiap-mecanica --region ${{ env.AWS_REGION }} 2>/dev/null || \
+        aws s3api create-bucket --bucket fiap-mecanica --region ${{ env.AWS_REGION }}
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+    - name: Terraform init
+      run: terraform init
+    - name: Terraform apply
+      run: terraform apply -auto-approve
+    - name: Capturar outputs do Terraform
+      id: tf_outputs
+      run: echo "eks_cluster_name=$(terraform output -raw eks_cluster_name)" >> "$GITHUB_OUTPUT"
+
+  cluster-addons:
+    needs: terraform-apply
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: producao
+    permissions:
+      contents: read
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+        aws-region: ${{ env.AWS_REGION }}
+    - name: Apontar kubectl para o cluster EKS
+      run: aws eks update-kubeconfig --name ${{ env.EKS_CLUSTER_NAME }} --region ${{ env.AWS_REGION }}
+    - name: Aplicar metrics-server (add-on de cluster — sem ele o HPA da app não funciona)
+      run: kubectl apply -f metrics-server.yaml
+    - name: Configurar Helm
+      uses: azure/setup-helm@v4
+    - name: Adicionar/atualizar repositório Helm da New Relic
+      run: |
+        helm repo add newrelic https://helm-charts.newrelic.com
+        helm repo update
+    - name: Limpar webhook conflitante da New Relic antes do upgrade (SSA field-manager conflict conhecido)
+      run: kubectl delete mutatingwebhookconfiguration newrelic-bundle-nri-metadata-injection --ignore-not-found
+    - name: Instalar/atualizar a integração Kubernetes da New Relic (nri-bundle)
+      run: |
+        helm upgrade --install newrelic-bundle newrelic/nri-bundle \
+          --namespace newrelic --create-namespace \
+          --set global.licenseKey="${{ secrets.NEW_RELIC_LICENSE_KEY }}" \
+          --set global.cluster="${{ env.EKS_CLUSTER_NAME }}" \
+          --set global.lowDataMode=true \
+          --set newrelic-infrastructure.privileged=true \
+          --set kube-state-metrics.enabled=true \
+          --set newrelic-logging.enabled=true \
+          --wait --timeout 5m0s
