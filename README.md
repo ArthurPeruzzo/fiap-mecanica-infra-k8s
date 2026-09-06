@@ -19,7 +19,10 @@ que antes concentrava toda a infraestrutura num state só.
 | `eks-cluster.tf` | `aws_eks_cluster.cluster` | Cluster EKS `eks-fiap-mecanica` |
 | `eks-node.tf` | `aws_eks_node_group.node-group` | Node group gerenciado (`t3.medium`, 1–3 nodes) |
 | `access-entry.tf` | Access entries | Admin do cluster pro usuário Lab (`voclabs`) + entry `EC2_LINUX` pra `LabRole` (nodes) |
-| `bucket.tf` | `aws_s3_bucket.bucket-backend` | Bucket S3 do backend remoto — usado por **todos os 4 repositórios**, cada um com sua própria chave |
+
+`bucket.tf` **não cria recurso nenhum** — é só um comentário explicando por que o bucket do
+backend (usado por **todos os 4 repositórios**, cada um com sua própria chave) não é gerenciado
+pelo Terraform. Ver "Bootstrap" abaixo.
 
 ## Por que a chave de state não foi renomeada
 
@@ -54,6 +57,30 @@ Esses arquivos ali são cópias congeladas, inofensivas, e podem ser apagados nu
 **A partir de agora, este repositório é o único que deve aplicar mudanças em VPC/EKS/node
 group.**
 
+## Bootstrap (bucket do backend) — sem passo manual
+
+O bucket S3 usado como backend remoto (`fiap-mecanica`) **não é um recurso Terraform** — é criado
+via `aws s3api create-bucket`, direto pelo `cd.yml`/`ci.yml`, de forma idempotente, antes do
+`terraform init`. Numa conta nova, é só disparar o CD normalmente; não há passo manual.
+
+### Por que não é gerenciado pelo Terraform
+
+Já foi um `resource "aws_s3_bucket"` aqui. O provider AWS, para esse tipo de recurso, sempre
+chama `GetBucketObjectLockConfiguration` como parte do ciclo normal de leitura (todo
+`plan`/`refresh`, não só na criação). Numa conta AWS Academy Lab encontrada em 2026-09-06, uma
+**Service Control Policy** nega essa chamada explicitamente — e SCP se propaga da Organização
+para **todas** as contas-membro, então trocar de conta dentro do mesmo programa não resolve.
+Nem a `LabRole` escapa de um "explicit deny" de SCP; não existe argumento do recurso que
+desative essa leitura. O efeito: todo `terraform plan` deste módulo passaria a falhar, para
+sempre, mesmo sem nenhuma mudança pendente.
+
+A correção foi tirar o bucket do Terraform e criá-lo por fora, com uma chamada que não aciona
+essa leitura. Rodando localmente (fora do CD), crie o bucket uma vez à mão antes do primeiro
+`terraform init`:
+```bash
+aws s3api create-bucket --bucket fiap-mecanica --region us-east-1
+```
+
 ## Variáveis (`vars.tf`)
 
 | Variável | Default | Descrição |
@@ -76,10 +103,10 @@ group.**
 
 ## CI/CD
 
-- `ci.yml` (Pull Request): `terraform plan`.
-- `cd.yml` (push na `main`): `terraform apply` do cluster, depois `kubectl apply` do
-  metrics-server e `helm upgrade --install` do `nri-bundle` da New Relic (agente de
-  infraestrutura + `kube-state-metrics` + `newrelic-logging`/Fluent Bit).
+- `ci.yml` (Pull Request): garante o bucket do backend, depois `terraform plan`.
+- `cd.yml` (push na `main`): garante o bucket do backend, `terraform apply` do cluster, depois
+  `kubectl apply` do metrics-server e `helm upgrade --install` do `nri-bundle` da New Relic
+  (agente de infraestrutura + `kube-state-metrics` + `newrelic-logging`/Fluent Bit).
 
 Secrets necessários: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` (sessão da
 conta Academy Lab, renovar quando expirar) e `NEW_RELIC_LICENSE_KEY` (a mesma usada pelo Secret
@@ -114,7 +141,7 @@ do SG do banco, deixaria uma referência a um SG que não existe mais).
 3º fiap-mecanica-infra-k8s (este)
 ```
 
-**Nunca destrua `aws_s3_bucket.bucket-backend`** — guarda os arquivos de state dos outros 3
-repositórios. O Terraform recusa destruir um bucket não-vazio (sem `force_destroy`, de
-propósito). "Derrubar tudo" quer dizer os recursos AWS de cada repositório — o bucket fica
-parado, pronto pro próximo apply.
+**O bucket do backend nunca é destruído por nenhum `terraform destroy` dos 4 repositórios** —
+não é mais estruturalmente possível, já que ele não é um recurso Terraform (ver "Bootstrap"
+acima). "Derrubar tudo" quer dizer os recursos AWS de cada repositório; o bucket fica parado,
+guardando os states, pronto pro próximo apply.

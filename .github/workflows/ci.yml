@@ -31,6 +31,13 @@ jobs:
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
         aws-region: ${{ env.AWS_REGION }}
+    # Mesmo motivo do cd.yml: o bucket não é gerenciado pelo Terraform, e o `terraform init`
+    # exige que ele já exista. Numa conta nova, a primeira PR rodaria antes de qualquer CD ter
+    # criado o bucket — este passo garante que o plan não falhe por isso.
+    - name: Garantir que o bucket do backend existe (idempotente)
+      run: |
+        aws s3api head-bucket --bucket fiap-mecanica --region ${{ env.AWS_REGION }} 2>/dev/null || \
+        aws s3api create-bucket --bucket fiap-mecanica --region ${{ env.AWS_REGION }}
     - name: Setup Terraform
       uses: hashicorp/setup-terraform@v3
     - name: Terraform init

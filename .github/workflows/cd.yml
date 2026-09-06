@@ -42,6 +42,15 @@ jobs:
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
         aws-region: ${{ env.AWS_REGION }}
+    # O bucket do backend não é gerenciado pelo Terraform (ver bucket.tf) — o recurso
+    # `aws_s3_bucket` sempre lê `GetBucketObjectLockConfiguration`, e uma SCP de conta AWS
+    # Academy Lab pode negar essa chamada explicitamente, quebrando todo `plan`/`apply` do módulo
+    # para sempre. Criar aqui, de forma idempotente, elimina o passo manual de bootstrap: numa
+    # conta nova, o próprio CD garante que o bucket existe antes do `terraform init`.
+    - name: Garantir que o bucket do backend existe (idempotente)
+      run: |
+        aws s3api head-bucket --bucket fiap-mecanica --region ${{ env.AWS_REGION }} 2>/dev/null || \
+        aws s3api create-bucket --bucket fiap-mecanica --region ${{ env.AWS_REGION }}
     - name: Setup Terraform
       uses: hashicorp/setup-terraform@v3
     - name: Terraform init
