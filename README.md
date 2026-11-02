@@ -70,9 +70,9 @@ Só subnets **públicas** (sem NAT gateway — economia na Academy Lab). Os nós
 
 | Output | Consumido por |
 |---|---|
-| `vpc_id`, `vpc_cidr`, `subnet_id`, `subnet_cidr` | `fiap-mecanica-infra-db` (rede do RDS) |
-| `eks_cluster_security_group_id` | `fiap-mecanica-infra-db` — libera a porta 3306 só para o SG do cluster |
-| `eks_cluster_name` | `cd.yml` deste repo (`update-kubeconfig`) e o `app-infra` do repo `fiap-mecanica` |
+| `vpc_id`, `vpc_cidr`, `subnet_id`, `subnet_cidr` | `fiap-mecanica-infra-db` e `fiap-estoque` (rede dos RDS) |
+| `eks_cluster_security_group_id` | `fiap-mecanica-infra-db` e `fiap-estoque` — liberam a porta 3306 só para o SG do cluster |
+| `eks_cluster_name` | `cd.yml` deste repo (`update-kubeconfig`), o `app-infra` do repo `fiap-mecanica` e o do `fiap-estoque` |
 | `eks_cluster_endpoint`, `eks_cluster_certificate_authority_data` | Endpoint/CA do control plane |
 | `eks_node_group_name` | Nome do node group |
 
@@ -105,12 +105,16 @@ helm upgrade --install newrelic-bundle newrelic/nri-bundle --namespace newrelic 
 
 ```
 1º  fiap-mecanica-infra-k8s   (este — cria o bucket e o cluster)
-2º  fiap-mecanica-infra-db    (lê o state deste)
-3º  fiap-mecanica-lambda      (independente)
-4º  fiap-mecanica             (app-infra lê 1º e 2º; apigateway cria a rota POST /auth/cliente — a Lambda já está no ar)
+2º  fiap-estoque              (lê o state deste: RDS próprio, RabbitMQ, estoque)   ┐ independentes entre si:
+    fiap-mecanica-infra-db    (lê o state deste: RDS do monólito)                  │ podem rodar em paralelo
+    fiap-mecanica-lambda      (independente)                                       ┘
+3º  fiap-mecanica             (app-infra lê 1º e o state do banco; apigateway cria a rota POST /auth/cliente e as
+                               rotas /peca e /insumo — a Lambda e o estoque já estão no ar)
 ```
 
-Não há gatilho automático entre os 4 CDs — cada um dispara no push da sua própria `main`. Numa conta zerada, rodar cada um nessa ordem, esperando o anterior ficar verde. Só é preciso rodar o CD do `fiap-mecanica` uma segunda vez se ele for executado antes de a Lambda existir (o job `apigw-apply` avisa quando isso acontece).
+Não há gatilho automático entre os CDs — cada um dispara no push da sua própria `main`. Numa conta zerada, rodar cada um nessa ordem, esperando o anterior ficar verde. Só é preciso rodar o CD do `fiap-mecanica` uma segunda vez se ele for executado antes da Lambda ou do estoque existirem (o job `apigw-apply` avisa quando isso acontece).
+
+**Execução manual:** este CD também tem o gatilho `workflow_dispatch` (Actions → CD → *Run workflow*). O GitHub não deixa reexecutar um run com mais de 30 dias, e numa conta nova da AWS Academy Lab (que zera toda a infra) o último run costuma estar velho demais.
 
 ## Documentação da API
 
