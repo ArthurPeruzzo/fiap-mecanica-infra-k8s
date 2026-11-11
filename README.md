@@ -37,7 +37,8 @@ graph TD
     SNa & SNb & SNc --- NG
     CP --- NG
 
-    NG -. hospeda .-> APP["Pods da aplicação<br/>(deploy pelo repo fiap-mecanica)"]
+    NG -. hospeda .-> APP["Pods dos serviços<br/>(deploy pelo repo de cada serviço)"]
+    NG -. hospeda .-> MQ["RabbitMQ (namespace mensageria)<br/>(deploy pelo repo fiap-estoque)"]
     NG -. hospeda .-> ADDONS["metrics-server · nri-bundle"]
 ```
 
